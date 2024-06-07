@@ -104,7 +104,7 @@ class SemanticACL {
 				self::disableCaching(); // That item is not always visible, disable caching.
 				$accessible = false;
 			} else {
-				$semanticData = $store->getSemanticData( $result );
+				$semanticData = $store->getSemanticData( $result, ['_txt'] );
 
 				// Look for a SemanticACL property in the page's list of properties.
 				foreach ( $semanticData->getProperties() as $property ) {
@@ -322,7 +322,7 @@ class SemanticACL {
 		}
 
 		$subject = SMWDIWikiPage::newFromTitle( $title );
-		$store = SMW\StoreFactory::getStore()->getSemanticData( $subject );
+		$store = SMW\StoreFactory::getStore()->getSemanticData( $subject, ['_txt'] );
 		$property = new SMWDIProperty( $prefix );
 		$aclTypes = $store->getPropertyValues( $property );
 

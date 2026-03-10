@@ -23,5 +23,6 @@
 	"sacl-template-render-denied-anonymous": "Error message seen by an anonymous user when being denied access",
 	"sacl-template-render-denied-registered": "Error message seen by registered user when being denied access",
 	"sacl-key-too-short": "Error message given when the private link key is too short",
-	"sacl-private-links-disabled": "Message appended to a private link when the feature has been disabled by an admin"
+	"sacl-private-links-disabled": "Message appended to a private link when the feature has been disabled by an admin",
+	"sacl-property-cascade-permissions": "This porperty is set if permissions are to be cascaded.  Translate it as you would translate the header of a table column/row."
 }

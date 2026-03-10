@@ -18,15 +18,18 @@ namespace MediaWiki\Extension\SemanticACL;
 
 use Article;
 use LogicException;
+use MediaWiki\Content\TextContent;
+use MediaWiki\Context\RequestContext;
 use MediaWiki\MediaWikiServices;
+use MediaWiki\Parser\Parser;
 use MediaWiki\Revision\SlotRecord;
-use RequestContext;
-use SMW;
-use SMWDIProperty;
-use SMWDIWikiPage;
-use SMWQueryResult;
-use TextContent;
-use Title;
+use MediaWiki\Revision\MutableRevisionRecord;
+use MediaWiki\Title\Title;
+use SMW\StoreFactory;
+use SMW\DIProperty;
+use SMW\DIWikiPage;
+use SMW\Query\QueryResult;
+use SMW\Store;
 
 /**
  * SemanticACL extension main class.
@@ -62,24 +65,25 @@ class SemanticACL {
 		$propertyRegistry->registerProperty( '___EDITABLE_WL_USER', '_txt', 'Editable by user' );
 		$propertyRegistry->registerPropertyDescriptionByMsgKey( '__EDITABLE_WL_USER', 'sacl-property-editable-wl-user' );
 
+		global $wgSemanticACLEnableCascadingACL;
+
+		if($wgSemanticACLEnableCascadingACL) {
+			// CASCADE
+			$propertyRegistry->registerProperty( '___CASCADE_PERMISSIONS', '_boo', 'Cascade permissions to subpages' );
+			$propertyRegistry->registerPropertyDescriptionByMsgKey( '___CASCADE_PERMISSIONS', 'sacl-property-cascade-permissions' );
+		}
+
 		return true;
 	}
 
 	/**
 	 * Filter results out of queries the current user is not supposed to see.
 	 */
-	public static function onSMWStoreAfterQueryResultLookupComplete( SMW\Store $store, &$queryResult ) {
+	public static function onSMWStoreAfterQueryResultLookupComplete( Store $store, QueryResult &$queryResult ) {
 		/* NOTE: this filtering does not work with count queries. To do filtering on count queries, we would
 		 * have to use SMW::Store::BeforeQueryResultLookupComplete to add conditions on ACL properties.
 		 * However, doing that would make it extremely difficult to tweak caching on results.
 		 */
-
-		/* FIX 
-		* "Argument 2 passed to MediaWiki\Extension\SemanticACL\SemanticACL::onSMWStoreAfterQueryResultLookupComplete() 
-		* must be an instance of SMW\Query\QueryRes, int given"
-		* after saving page with visual editor
-		*/
-		if ( !$queryResult instanceof SMWQueryResult) return; 
 
 		$filtered = [];
 		$changed = false; // If the result list was changed.
@@ -139,7 +143,7 @@ class SemanticACL {
 		}
 
 		// Build a new query result object
-		$queryResult = new SMWQueryResult(
+		$queryResult = new QueryResult(
 			$queryResult->getPrintRequests(),
 			$queryResult->getQuery(),
 			$filtered,
@@ -180,17 +184,15 @@ class SemanticACL {
 	}
 
 	/**
-	 * Called when the parser fetches a template.
-	 * Replaces the template with an error message if the user cannot view the template.
-	 *
-	 * @param \Parser|false $parser Parser object or false
-	 * @param Title $title Title object of the template to be fetched
-	 * @param \Revision $rev Revision object of the template
-	 * @param string|false|null $text transclusion text of the template or false or null
-	 * @param array $deps array of template dependencies with 'title', 'page_id', 'rev_id' keys
-	 * @return bool False if an error text oughta be shown, else true
+	 * This hook is called before a template is fetched by Parser.
+
+     * @param ?LinkTarget $contextTitle The top-level page title, if any
+     * @param LinkTarget $title The template link (from the literal wikitext)
+     * @param bool &$skip Skip this template and link it?
+     * @param ?RevisionRecord &$revRecord The desired revision record
+     * @return bool|void True or no return value to continue or false to abort
 	 */
-	public static function onParserFetchTemplate( $parser, $title, $rev, &$text, &$deps ) {
+	public static function onBeforeParserFetchTemplateRevisionRecord( $contextTitle, $title, &$skip, &$revRecord ) {
 		$user = RequestContext::getMain()->getUser();
 		if ( self::hasPermission( $title, 'read', $user, true ) ) {
 			// User is allowed to view that template.
@@ -203,16 +205,18 @@ class SemanticACL {
 		} else {
 			$msgKey = 'sacl-template-render-denied-registered';
 		}
-		$text = wfMessage( $msgKey )->plain();
 
-		return false;
+		// Fetch the RevisionRecord for the replacement messages (used as a template).
+		$revRecord = new MutableRevisionRecord(Title::newFromText($msgKey, NS_MEDIAWIKI));
+
+		return true;
 	}
 
 	/**
 	 * To interrupt/advise the "user can do X to Y article" check.
 	 *
 	 * @param Title $title Title object being checked against
-	 * @param \User $user Current user object
+	 * @param \MediaWiki\User\User $user Current user object
 	 * @param string $action Action being checked
 	 * @param array|string &$result User permissions error to add. If none, return true.
 	 *   $result can be returned as a single error message key (string), or an array of error message
@@ -232,7 +236,7 @@ class SemanticACL {
 	/**
 	 * Register render callbacks with the parser.
 	 *
-	 * @param \Parser &$parser
+	 * @param Parser &$parser
 	 */
 	public static function onParserFirstCallInit( &$parser ) {
 		$parser->setFunctionHook( 'SEMANTICACL_PRIVATE_LINK', __CLASS__ . '::getPrivateLink' );
@@ -244,15 +248,21 @@ class SemanticACL {
 	/**
 	 * Render callback to get a private link.
 	 *
-	 * @param \Parser &$parser The current parser
+	 * @param Parser &$parser The current parser
 	 * @param string $key The key for the private link
 	 * @return string A full URL with the correct arguments set on success, error message if $key
 	 *   is too short
 	 */
-	public static function getPrivateLink( \Parser &$parser, $key = '' ) {
-		global $wgEnablePrivateLinks;
+	public static function getPrivateLink( Parser &$parser, $key = '' ) {
+		global $wgSemanticACLEnablePrivateLinks;
+		global $wgEnablePrivateLinks; // Old name.
 
-		if ( !$wgEnablePrivateLinks ) {
+		if($wgEnablePrivateLinks) {
+			$wgSemanticACLEnablePrivateLinks = $wgEnablePrivateLinks;
+			wfDeprecated( 'EnablePrivateLinks was replaced with SemanticACLEnablePrivateLinks' );
+		}
+
+		if ( !$wgSemanticACLEnablePrivateLinks ) {
 			$key = wfMessage( 'sacl-private-links-disabled' )->text();
 		}
 
@@ -276,14 +286,13 @@ class SemanticACL {
 	 *
 	 * @param Title $title the title object to check permission on
 	 * @param string $action the action the user wants to do
-	 * @param \User $user the user to check permissions for
+	 * @param \MediaWiki\User\User $user the user to check permissions for
 	 * @param bool $disableCaching force the page being checked to be rerendered for each user
 	 * @return bool if the user is allowed to conduct the action
 	 */
-	protected static function hasPermission( $title, $action, $user, $disableCaching = true ) {
+	protected static function hasPermission( $title, $action, $user, $disableCaching = true) {
 		global $smwgNamespacesWithSemanticLinks;
 		global $wgSemanticACLWhitelistIPs;
-		global $wgRequest;
 
 		if ( $title->isTalkPage() ) {
 			// Talk pages get the same permission as their subject page.
@@ -321,9 +330,9 @@ class SemanticACL {
 			$prefix = '___EDITABLE';
 		}
 
-		$subject = SMWDIWikiPage::newFromTitle( $title );
-		$store = SMW\StoreFactory::getStore()->getSemanticData( $subject, ['_txt'] );
-		$property = new SMWDIProperty( $prefix );
+		$subject = DIWikiPage::newFromTitle( $title );
+		$store = StoreFactory::getStore()->getSemanticData( $subject, ['_txt'] );
+		$property = new DIProperty( $prefix );
 		$aclTypes = $store->getPropertyValues( $property );
 
 		if ( $disableCaching ) {
@@ -338,10 +347,14 @@ class SemanticACL {
 			return true;
 		}
 
+		// Do not use ACL in command line mode.
+		if( defined( 'MW_ENTRY_POINT' ) && MW_ENTRY_POINT == 'cli') {
+			return true;
+		}
+
 		// Always allow whitelisted IPs through.
-		if (
-			isset( $wgSemanticACLWhitelistIPs ) &&
-			in_array( $wgRequest->getIP(), $wgSemanticACLWhitelistIPs )
+		if ( isset( $wgSemanticACLWhitelistIPs ) &&
+			in_array( RequestContext::getMain()->getRequest()->getIP(), $wgSemanticACLWhitelistIPs )
 		) {
 			return true;
 		}
@@ -352,6 +365,11 @@ class SemanticACL {
 			}
 		}
 
+		static $_permissionCache = []; // Cache computed permissions because lookups are expensive.
+
+		// Return the permission if it was computed before.
+		if(isset($_permissionCache[$title->getFullText().'-'.$action])) { return $_permissionCache[$title->getFullText().'-'.$action]; }
+
 		$hasPermission = true;
 
 		foreach ( $aclTypes as $valueObj ) { // For each ACL specifier.
@@ -359,8 +377,8 @@ class SemanticACL {
 				case 'whitelist':
 					$isWhitelisted = false;
 
-					$groupProperty = new SMWDIProperty( "{$prefix}_WL_GROUP" );
-					$userProperty = new SMWDIProperty( "{$prefix}_WL_USER" );
+					$groupProperty = new DIProperty( "{$prefix}_WL_GROUP" );
+					$userProperty = new DIProperty( "{$prefix}_WL_USER" );
 					$whitelistValues = $store->getPropertyValues( $groupProperty );
 
 					// Check if the current user is part of a whitelisted group.
@@ -371,13 +389,7 @@ class SemanticACL {
 						 */
 						$group = strtolower( $whitelistValue->getString() );
 
-						if ( method_exists( MediaWikiServices::class, 'getUserGroupManager' ) ) {
-							// MW 1.35+
-							$effectiveGroups = MediaWikiServices::getInstance()->getUserGroupManager()
-								->getUserEffectiveGroups( $user );
-						} else {
-							$effectiveGroups = $user->getEffectiveGroups();
-						}
+						$effectiveGroups = MediaWikiServices::getInstance()->getUserGroupManager()->getUserEffectiveGroups( $user );
 
 						if ( in_array( $group, array_map( 'strtolower', $effectiveGroups ) ) ) {
 							$isWhitelisted = true;
@@ -406,8 +418,15 @@ class SemanticACL {
 					 * property. Doing so would expose it to searches and queries.
 					 */
 
-					global $wgEnablePrivateLinks;
-					if ( !$wgEnablePrivateLinks ) {
+					 global $wgSemanticACLEnablePrivateLinks;
+					 global $wgEnablePrivateLinks; // Old name.
+
+					if($wgEnablePrivateLinks) {
+						 $wgSemanticACLEnablePrivateLinks = $wgEnablePrivateLinks;
+						 wfDeprecated( 'EnablePrivateLinks was replaced with SemanticACLEnablePrivateLinks' );
+					}
+
+					if ( !$wgSemanticACLEnablePrivateLinks ) {
 						// Private links have been disabled.
 						break;
 					}
@@ -436,7 +455,7 @@ class SemanticACL {
 					$text = $parser->recursivePreprocess(
 						$content->getText(),
 						$title,
-						$parser->mOptions
+						$parser->getOptions()
 					);
 
 					$query = RequestContext::getMain()->getRequest()->getQueryValues();
@@ -449,7 +468,7 @@ class SemanticACL {
 						// If the key provided in the request arguments matches the key in the page.
 						$query[self::URL_ARG_NAME] === $key
 					) {
-						return true;
+						$hasPermission = true;
 					}
 
 					break;
@@ -459,13 +478,48 @@ class SemanticACL {
 					break;
 
 				case 'public':
-					return true;
+					$hasPermission = true;
 			}
 		}
 
+		// Check for cascading permissions.
+
+		global $wgSemanticACLEnableCascadingACL;
+
+		if(!$aclTypes && // Subpages can always override access control.
+			$wgSemanticACLEnableCascadingACL && // Cascading ACL is enabled.
+			$title->isSubPage() // Only cascade for subpages.
+		) {
+			$parent = $title;
+
+			do {
+				$parent = $parent->getBaseTitle();
+
+				if(!$parent->exists()) {
+					if(!$parent->isSubPage()) { break; }
+					continue; // Skip page, it does not exist.
+				}
+
+				// Check if cascading is enabled for the parent page.
+				$subject = DIWikiPage::newFromTitle( $parent );
+				$store = StoreFactory::getStore()->getSemanticData( $subject );
+				$cascade = $store->getPropertyValues( new DIProperty( '___CASCADE_PERMISSIONS' ) );
+
+				if( isset($cascade[0]) && $cascade[0]->getBoolean() ) { // Get permissions from the parent page.
+					$wgSemanticACLEnableCascadingACL = false; // Disable cascading during the lookup.
+					$hasPermission = self::hasPermission($parent, $action, $user, $disableCaching);
+					$wgSemanticACLEnableCascadingACL = true;
+					break;
+				}
+
+				// No cascading on that page, keep going.
+			} while ($parent->isSubPage());
+		}
+
+		$_permissionCache[$title->getFullText().'-'.$action] = $hasPermission; // Cache the permission.
+
 		return $hasPermission;
 	}
-
 
 	/**
 	 * Disable caching for the page currently being rendered.
@@ -488,14 +542,17 @@ class SemanticACL {
 	 * @return bool if the file has been properly categorized
 	 */
 	protected static function fileHasRequiredCategory( $title ) {
-		global $wgPublicImagesCategory;
+		global $wgSemanticACLPublicImagesCategory;
+		global $wgPublicImagesCategory; // Old name.
 
-		if (
-			isset( $wgPublicImagesCategory ) && $wgPublicImagesCategory &&
+		if($wgPublicImagesCategory) {
+			$wgSemanticACLPublicImagesCategory = $wgPublicImagesCategory;
+			wfDeprecated( 'PublicImagesCategory as replaced with SemanticACLPublicImagesCategory' );
+		}
+
+		if ( isset( $wgSemanticACLPublicImagesCategory ) && $wgSemanticACLPublicImagesCategory &&
 			$title->getNamespace() == NS_FILE
 		) {
-			$inCategory = false;
-
 			$page = Article::newFromTitle( $title, RequestContext::getMain() );
 			$file = $page->getFile();
 
@@ -504,8 +561,8 @@ class SemanticACL {
 				return true;
 			}
 
-			foreach ( $page->getCategories() as $category ) {
-				if ( $category->getDBkey() == str_replace( ' ', '_', $wgPublicImagesCategory ) ) {
+			foreach ( $page->getForeignCategories() as $category ) {
+				if ( $category->getDBkey() == str_replace( ' ', '_', $wgSemanticACLPublicImagesCategory ) ) {
 					return true;
 				}
 			}

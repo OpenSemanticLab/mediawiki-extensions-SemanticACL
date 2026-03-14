@@ -79,11 +79,16 @@ class SemanticACL {
 	/**
 	 * Filter results out of queries the current user is not supposed to see.
 	 */
-	public static function onSMWStoreAfterQueryResultLookupComplete( Store $store, QueryResult &$queryResult ) {
+	public static function onSMWStoreAfterQueryResultLookupComplete( Store $store, &$queryResult ) {
 		/* NOTE: this filtering does not work with count queries. To do filtering on count queries, we would
 		 * have to use SMW::Store::BeforeQueryResultLookupComplete to add conditions on ACL properties.
 		 * However, doing that would make it extremely difficult to tweak caching on results.
 		 */
+
+		// In SMW 6.x the second argument can be an int (count) or string instead of a QueryResult.
+		if ( !$queryResult instanceof QueryResult ) {
+			return true;
+		}
 
 		$filtered = [];
 		$changed = false; // If the result list was changed.
